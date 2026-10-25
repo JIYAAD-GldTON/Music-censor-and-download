@@ -1,0 +1,13 @@
+openai-whisper>=20231117
+customtkinter>=5.2.0
+syncedlyrics>=1.0.0
+sounddevice>=0.4.6
+pydub>=0.25.1
+numpy>=1.24.0
+yt-dlp>=2024.01.01
+click>=8.1.0
+rich>=13.0.0
+scipy>=1.11.0
+torch>=2.0.0
+tqdm>=4.66.0
+spotdl>=4.2.0

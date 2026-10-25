@@ -1,0 +1,75 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+!downloads/.gitkeep
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Censored output artifacts
+censored_output/
+!censored_output/.gitkeep
+censored_report.json
+
+# Audio / Video runtime files (prevents pushing copyrighted/large music)
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.aac
+*.opus
+*.mp4
+*.mkv
+*.webm
+
+# Keep repository asset
+!data/beep.wav
+
+# Synced lyrics cached files (optional)
+# *.lrc
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Test temporary artifacts
+tests/test_playlist/
+tests/playlist_clean/
+tests/test_sample*.wav
