@@ -5,6 +5,7 @@ Playlist Mode for batch censoring downloaded playlists, folders, and media files
 import os
 import json
 import subprocess
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from rich.console import Console
@@ -14,8 +15,10 @@ from core.filter.detector import ProfanityDetector, CensorInterval
 from core.asr.whisper_engine import WhisperEngine
 from core.censor.ffmpeg_censor import FFmpegCensor
 from core.rea.format_inspector import REAFormatInspector, PlaylistManifest, TrackInfo
+from core.logger import get_logger
 
-console = Console()
+logger = get_logger("modes.playlist")
+console = Console(legacy_windows=False)
 
 
 class PlaylistCensorRunner:
@@ -30,7 +33,9 @@ class PlaylistCensorRunner:
         post_padding: float = 0.18,
         time_offset: float = 0.0,
         beep_freq: int = 1000,
-        intro_offset: Optional[float] = None
+        intro_offset: Optional[float] = None,
+        dry_run: bool = False,
+        cancel_event: Optional[threading.Event] = None
     ):
         self.whisper_model = whisper_model
         self.mode = mode
@@ -41,6 +46,8 @@ class PlaylistCensorRunner:
         self.post_padding = post_padding
         self.time_offset = time_offset
         self.intro_offset = intro_offset
+        self.dry_run = dry_run
+        self.cancel_event = cancel_event
 
         self.inspector = REAFormatInspector()
         self.detector = ProfanityDetector(
@@ -56,11 +63,11 @@ class PlaylistCensorRunner:
         """
         Process a playlist folder, M3U file, or remote URL.
         """
-        console.print(f"[bold cyan]🔍 Inspecting input target:[/bold cyan] {target_input}")
+        console.print(f"[bold cyan][SCAN] Inspecting input target:[/bold cyan] {target_input}")
         manifest = self.inspector.inspect_target(target_input)
 
         console.print(
-            f"[green]✔ Target format identified:[/green] [bold]{manifest.format_type}[/bold] "
+            f"[green][OK] Target format identified:[/green] [bold]{manifest.format_type}[/bold] "
             f"({len(manifest.tracks)} tracks found)"
         )
 
@@ -76,7 +83,7 @@ class PlaylistCensorRunner:
         }
 
         with Progress(
-            SpinnerColumn(),
+            SpinnerColumn(spinner_name="line"),
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
             TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
@@ -86,6 +93,11 @@ class PlaylistCensorRunner:
             overall_task = progress.add_task("[yellow]Processing tracks...", total=len(manifest.tracks))
 
             for track in manifest.tracks:
+                if self.cancel_event and self.cancel_event.is_set():
+                    console.print("[yellow]Operation cancelled by user.[/yellow]")
+                    report["summary"]["cancelled"] = True
+                    break
+
                 progress.update(overall_task, description=f"[cyan]Processing: {track.title[:30]}")
                 track_result = self._process_single_track(track, out_dir)
                 report["processed_tracks"].append(track_result)
@@ -103,7 +115,7 @@ class PlaylistCensorRunner:
         with open(report_file, "w", encoding="utf-8") as rf:
             json.dump(report, rf, indent=2, ensure_ascii=False)
 
-        console.print(f"\n[bold green]✨ Batch Censoring Complete![/bold green]")
+        console.print(f"\n[bold green][DONE] Batch Censoring Complete![/bold green]")
         console.print(f"Total Tracks Processed: {report['total_tracks']}")
         console.print(f"Clean Tracks: {report['summary']['clean_tracks']}")
         console.print(f"Censored Tracks: {report['summary']['censored_tracks']}")
@@ -139,21 +151,27 @@ class PlaylistCensorRunner:
             # 2. Detect profanities
             intervals = self.detector.detect_in_words(words, lang=self.lang)
 
-            # 3. Apply censorship
-            self.censor.censor_media(
-                input_path=track_path,
-                output_path=out_filepath,
-                intervals=intervals,
-                mode=self.mode
-            )
+            # 3. Apply censorship (unless in dry-run preview mode)
+            if not self.dry_run:
+                self.censor.censor_media(
+                    input_path=track_path,
+                    output_path=out_filepath,
+                    intervals=intervals,
+                    mode=self.mode
+                )
+                status = "success"
+                final_out = out_filepath
+            else:
+                status = "dry_run"
+                final_out = None
 
             flagged_words = [i.matched_word for i in intervals]
 
             return {
                 "title": track.title,
                 "input_file": track_path,
-                "output_file": out_filepath,
-                "status": "success",
+                "output_file": final_out,
+                "status": status,
                 "cuss_words_count": len(intervals),
                 "flagged_words": flagged_words,
                 "intervals": [{"start": i.start, "end": i.end, "word": i.matched_word} for i in intervals]

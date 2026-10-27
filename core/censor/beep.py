@@ -1,14 +1,40 @@
 """
 Beep and Mute audio segment replacement module using pydub and numpy.
+Supports precise format mapping for loss-free container preservation.
 """
 
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Any, Optional
 import numpy as np
 from pydub import AudioSegment
 from pydub.generators import Sine
 from core.filter.detector import CensorInterval
+from core.logger import get_logger
+
+logger = get_logger("censor.beep")
+
+# Format mapping for pydub's AudioSegment.export()
+# pydub passes format directly to ffmpeg (-f <fmt>)
+FORMAT_EXPORT_MAP: Dict[str, str] = {
+    "m4a": "ipod",
+    "mp4": "mp4",
+    "aac": "adts",
+    "mp3": "mp3",
+    "wav": "wav",
+    "flac": "flac",
+    "ogg": "ogg",
+    "opus": "opus",
+    "webm": "webm",
+    "wma": "asf",
+}
+
+
+def get_pydub_export_format(suffix_or_path: str) -> str:
+    """Resolve the appropriate FFmpeg container format name for pydub export."""
+    p = Path(suffix_or_path)
+    ext = p.suffix.lstrip(".").lower() if p.suffix else str(suffix_or_path).lstrip(".").lower()
+    return FORMAT_EXPORT_MAP.get(ext, ext or "mp3")
 
 
 def copy_media_tags(src_path: str, dst_path: str) -> None:
@@ -24,8 +50,8 @@ def copy_media_tags(src_path: str, dst_path: str) -> None:
                 for k, v in src.tags.items():
                     try:
                         dst.tags[k] = v
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Failed setting tag %s: %s", k, e)
                 dst.save()
             elif hasattr(dst, 'add_tags'):
                 try:
@@ -33,13 +59,13 @@ def copy_media_tags(src_path: str, dst_path: str) -> None:
                     for k, v in src.tags.items():
                         try:
                             dst.tags[k] = v
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug("Failed adding tag %s: %s", k, e)
                     dst.save()
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as e:
+                    logger.debug("Failed initializing tags on %s: %s", dst_path, e)
+    except Exception as e:
+        logger.debug("Metadata copy failed from %s to %s: %s", src_path, dst_path, e)
 
 
 class AudioCensor:
@@ -68,9 +94,18 @@ class AudioCensor:
         audio = AudioSegment.from_file(input_path)
         total_len_ms = len(audio)
 
+        ext = Path(output_path).suffix.lstrip(".").lower() or "mp3"
+        out_fmt = get_pydub_export_format(output_path)
+        export_kwargs: Dict[str, Any] = {"format": out_fmt}
+        if ext == "opus":
+            export_kwargs["codec"] = "libopus"
+        elif ext == "m4a":
+            export_kwargs["codec"] = "aac"
+
         if not intervals:
             # No profanity detected, just export copy
-            audio.export(output_path)
+            logger.info("No profanities detected in %s; exporting clean copy.", input_path)
+            audio.export(output_path, **export_kwargs)
             copy_media_tags(input_path, output_path)
             return output_path
 
@@ -111,9 +146,9 @@ class AudioCensor:
         if last_end_ms < total_len_ms:
             censored += audio[last_end_ms:]
 
-        out_fmt = Path(output_path).suffix.lstrip(".").lower() or "mp3"
-        censored.export(output_path, format=out_fmt)
+        censored.export(output_path, **export_kwargs)
         copy_media_tags(input_path, output_path)
+        logger.info("Successfully censored %s -> %s (format: %s)", input_path, output_path, out_fmt)
         return output_path
 
 

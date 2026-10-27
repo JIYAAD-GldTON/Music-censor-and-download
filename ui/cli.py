@@ -18,7 +18,7 @@ from core.devices import get_windows_output_devices
 from ui.gui import launch_gui
 from downloader import QUALITY_PROFILES, download_song_or_playlist, download_high_quality
 
-console = Console()
+console = Console(legacy_windows=False)
 
 
 @click.group()
@@ -94,15 +94,19 @@ def run_download(url, quality, output_dir, single):
 @click.option("--model", default="base", help="Whisper model size (tiny, base, small, medium).")
 @click.option("--offset", "-off", default=0.0, type=float, help="Timing offset in seconds (e.g. -0.5 to play censors 0.5s earlier).")
 @click.option("--intro-offset", "-intro", default=None, type=float, help="Manual intro vocal start offset in seconds (skips instrumental intro noise).")
-def run_playlist(target_input, mode, lang, output_dir, model, offset, intro_offset):
+@click.option("--dry-run", is_flag=True, default=False, help="Preview detected profanities without generating output files.")
+def run_playlist(target_input, mode, lang, output_dir, model, offset, intro_offset, dry_run):
     """Batch-censor downloaded playlists, directories of songs/videos, or streaming URLs."""
+    if dry_run:
+        console.print("[yellow][DRY-RUN] Mode active: files will be scanned but not modified.[/yellow]")
     runner = PlaylistCensorRunner(
         whisper_model=model,
         mode=mode,
         lang=lang,
         output_dir=output_dir,
         time_offset=offset,
-        intro_offset=intro_offset
+        intro_offset=intro_offset,
+        dry_run=dry_run
     )
     runner.process_playlist(target_input)
 
@@ -120,7 +124,8 @@ def run_playlist(target_input, mode, lang, output_dir, model, offset, intro_offs
 @click.option("--offset", "-off", default=0.0, type=float, help="Timing offset in seconds (e.g. -0.5 to play censors 0.5s earlier).")
 @click.option("--intro-offset", "-intro", default=None, type=float, help="Manual intro vocal start offset in seconds (skips instrumental intro noise).")
 @click.option("--desc", default=None, help="Path to YouTube .description file or YouTube URL to extract lyrics from.")
-def run_single_file(input_file, output_file, song, artist, lrc, query, mode, lang, model, offset, intro_offset, desc):
+@click.option("--dry-run", is_flag=True, default=False, help="Preview detected profanities without modifying or saving files.")
+def run_single_file(input_file, output_file, song, artist, lrc, query, mode, lang, model, offset, intro_offset, desc, dry_run):
     """Censor a single audio or video file."""
     from pathlib import Path
     in_p = Path(input_file)
@@ -167,6 +172,10 @@ def run_single_file(input_file, output_file, song, artist, lrc, query, mode, lan
     console.print(f"[green]Profanities detected:[/green] {len(intervals)}")
     for i in intervals:
         console.print(f"  • [{i.start:.2f}s - {i.end:.2f}s]: [bold red]{i.matched_word}[/bold red]")
+
+    if dry_run:
+        console.print("\n[bold yellow][DRY-RUN] Mode: media censoring skipped. No files written.[/bold yellow]")
+        return
 
     censor = FFmpegCensor()
     censor.censor_media(input_file, output_file, intervals, mode=mode)
