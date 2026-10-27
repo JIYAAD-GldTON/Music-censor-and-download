@@ -8,6 +8,9 @@ import os
 import whisper
 from core.filter.detector import WordTimestamp
 from core.asr.lyrics_provider import OnlineLyricsProvider
+from core.logger import get_logger
+
+logger = get_logger("asr.whisper")
 
 
 class WhisperEngine:
@@ -26,7 +29,7 @@ class WhisperEngine:
     def model(self):
         if self._model is None:
             # Lazy load model on first use
-            print(f"[WhisperEngine] Loading Whisper '{self.model_name}' model...")
+            logger.info("Loading Whisper '%s' model...", self.model_name)
             self._model = whisper.load_model(self.model_name, device=self.device)
         return self._model
 
@@ -66,7 +69,7 @@ class WhisperEngine:
             if synced_words:
                 if getattr(self.lyrics_provider, "is_untimed", False):
                     try:
-                        print(f"[ASR Engine] Untimed lyrics detected ({len(self.lyrics_provider.last_timed_lines)} lines). Running AI Audio Alignment with Whisper...")
+                        logger.info("Untimed lyrics detected (%d lines). Running AI Audio Alignment with Whisper...", len(self.lyrics_provider.last_timed_lines))
                         align_kwargs = {
                             "task": task,
                             "initial_prompt": "Hindi, Hinglish, English rap songs, hip hop lyrics, slang, profanity, cuss words."
@@ -93,21 +96,15 @@ class WhisperEngine:
                                 self.lyrics_provider.last_raw_lyrics = formatted_lrc
                                 self.lyrics_provider.last_source = f"{self.lyrics_provider.last_source} (AI Aligned)"
                                 self.lyrics_provider.is_untimed = False
-                                print(f"[ASR Engine] AI Audio Alignment complete: {len(aligned)} lines precisely synchronized to vocals.")
+                                logger.info("AI Audio Alignment complete: %d lines synchronized to vocals.", len(aligned))
                     except Exception as e:
-                        print(f"[ASR Engine] AI Audio Alignment fallback warning: {e}")
+                        logger.warning("AI Audio Alignment fallback warning: %s", e)
 
                 self.last_source = self.lyrics_provider.last_source or "lyrics"
-                try:
-                    print(f"[ASR Engine] Using synchronized lyrics for '{os.path.basename(media_path)}' ({len(synced_words)} words).")
-                except Exception:
-                    pass
+                logger.info("Using synchronized lyrics for '%s' (%d words).", os.path.basename(media_path), len(synced_words))
                 return synced_words
             else:
-                try:
-                    print(f"[ASR Engine] Running local OpenAI Whisper ({self.model_name})...")
-                except Exception:
-                    pass
+                logger.info("Running local OpenAI Whisper (%s)...", self.model_name)
 
         self.last_source = "whisper"
         kwargs = {

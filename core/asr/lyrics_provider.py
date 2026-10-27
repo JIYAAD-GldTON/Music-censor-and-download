@@ -10,8 +10,11 @@ import re
 import os
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Any
 from core.filter.detector import WordTimestamp
+from core.logger import get_logger
+
+logger = get_logger("lyrics_provider")
 
 try:
     import syncedlyrics
@@ -104,9 +107,52 @@ def parse_lrc_content(lrc_text: str) -> List[WordTimestamp]:
     return words_output
 
 
+def _get_tag_str(tags: Any, *keys: str) -> str:
+    """Helper to safely extract string value from mutagen tags dict, object, or list."""
+    if not tags:
+        return ""
+    for k in keys:
+        val = None
+        if hasattr(tags, "get"):
+            try:
+                val = tags.get(k)
+            except Exception:
+                val = None
+            if not val and hasattr(tags, "keys"):
+                try:
+                    for tag_key in tags.keys():
+                        if str(tag_key).lower() == k.lower():
+                            val = tags.get(tag_key)
+                            break
+                except Exception:
+                    pass
+        elif hasattr(tags, "__getitem__"):
+            try:
+                val = tags[k]
+            except Exception:
+                val = None
+
+        if val is not None:
+            try:
+                if isinstance(val, (list, tuple)) and len(val) > 0:
+                    s = str(val[0]).strip()
+                elif hasattr(val, "text") and isinstance(val.text, (list, tuple)) and len(val.text) > 0:
+                    s = str(val.text[0]).strip()
+                else:
+                    s = str(val).strip()
+
+                s = s.strip("[]'\"")
+                if s and s.lower() != "none":
+                    return s
+            except Exception as e:
+                logger.debug("Error parsing tag %s: %s", k, e)
+    return ""
+
+
 def extract_song_and_artist(media_path: str) -> Tuple[str, str]:
     """
     Extract (song_title, artist_name) from ID3/metadata tags or filename.
+    Safely handles ID3, Vorbis, and MP4 tags without crashing on malformed tags.
     """
     artist = ""
     title = ""
@@ -114,20 +160,13 @@ def extract_song_and_artist(media_path: str) -> Tuple[str, str]:
         import mutagen
         f = mutagen.File(media_path)
         if f:
-            if hasattr(f, 'tags') and f.tags:
-                artist = str(f.tags.get('TPE1', f.tags.get('artist', [''])[0]))
-                title = str(f.tags.get('TIT2', f.tags.get('title', [''])[0]))
-            if not artist or not title:
-                artist = str(f.get('TPE1', f.get('artist', [''])[0]))
-                title = str(f.get('TIT2', f.get('title', [''])[0]))
-            artist = artist.strip().strip("[]'")
-            title = title.strip().strip("[]'")
-            if artist.lower() == "none":
-                artist = ""
-            if title.lower() == "none":
-                title = ""
-    except Exception:
-        pass
+            tags = getattr(f, "tags", None) or f
+            # Check Artist: ID3 (TPE1, TPE2), Vorbis/FLAC (artist), MP4 (©ART, aART)
+            artist = _get_tag_str(tags, "TPE1", "TPE2", "artist", "ARTIST", "\xa9ART", "©ART", "aART")
+            # Check Title: ID3 (TIT2), Vorbis/FLAC (title), MP4 (©nam)
+            title = _get_tag_str(tags, "TIT2", "title", "TITLE", "\xa9nam", "©nam")
+    except Exception as e:
+        logger.debug("Mutagen extraction fallback for %s: %s", media_path, e)
 
     stem = Path(media_path).stem
     cleaned = re.sub(r'(_clean|_censored)+$', '', stem, flags=re.I)
@@ -158,8 +197,8 @@ def get_audio_duration(media_path: str) -> float:
         f = mutagen.File(media_path)
         if f and hasattr(f, 'info') and hasattr(f.info, 'length') and f.info.length:
             return float(f.info.length)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Mutagen length lookup failed for %s: %s", media_path, e)
 
     try:
         cmd = [
@@ -171,8 +210,8 @@ def get_audio_duration(media_path: str) -> float:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         if res.returncode == 0 and res.stdout.strip():
             return float(res.stdout.strip())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("ffprobe duration lookup failed for %s: %s", media_path, e)
     return 0.0
 
 
@@ -193,8 +232,8 @@ def fetch_youtube_description_from_url(url: str) -> Optional[str]:
         res = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="ignore", timeout=20)
         if res.returncode == 0 and res.stdout and res.stdout.strip():
             return res.stdout.strip()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("yt-dlp failed to fetch description for URL %s: %s", url, e)
     return None
 
 
@@ -207,8 +246,8 @@ def fetch_youtube_description_from_query(query: str) -> Optional[str]:
         res = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="ignore", timeout=20)
         if res.returncode == 0 and res.stdout and res.stdout.strip():
             return res.stdout.strip()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("yt-dlp query '%s' failed: %s", query, e)
     return None
 
 

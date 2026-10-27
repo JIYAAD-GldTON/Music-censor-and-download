@@ -1,36 +1,51 @@
 """
-Windows Audio Output Device Inspector.
-Extracts clean, friendly Windows sound playback devices (matching Windows Sound Settings),
-filtering out driver duplicates (MME/DirectSound/WDM-KS) and internal driver path clutter.
+Audio Output Device Inspector.
+Extracts clean, user-friendly sound playback devices across Windows, macOS, and Linux,
+filtering driver clones, virtual audio mappers, and internal path clutter.
 """
 
+import sys
 import re
 from typing import List, Dict, Any
 from collections.abc import Sequence
 import sounddevice as sd
+from core.logger import get_logger
+
+logger = get_logger("devices")
 
 
-def get_windows_output_devices() -> List[Dict[str, Any]]:
+def get_audio_output_devices() -> List[Dict[str, Any]]:
     """
-    Retrieve clean, important audio output playback devices matching Windows Sound Settings.
-    Deduplicates driver clones and marks the system default playback endpoint.
+    Retrieve clean, deduplicated audio output playback endpoints.
+    Cross-platform support:
+      - Windows: Prioritizes WASAPI endpoints, strips driver prefix clutter.
+      - macOS: Resolves CoreAudio playback endpoints.
+      - Linux: Resolves PulseAudio / ALSA playback endpoints.
     """
     try:
         devs = sd.query_devices()
         apis = sd.query_hostapis()
-        wasapi_api = next((h for h in apis if "WASAPI" in h.get("name", "")), None)
-        wasapi_default_out = wasapi_api["default_output_device"] if wasapi_api else -1
-        default_out_idx = sd.default.device[1]
-        default_out_name = ""
-        if isinstance(devs, Sequence) and 0 <= default_out_idx < len(devs):
-            dev_info = devs[default_out_idx]
-            if isinstance(dev_info, dict):
-                default_out_name = dev_info.get("name", "")
-    except Exception:
+    except Exception as e:
+        logger.debug("Failed querying audio devices: %s", e)
         return []
 
-    wasapi_devs = []
-    other_devs = []
+    is_windows = sys.platform == "win32"
+    wasapi_api = next((h for h in apis if "WASAPI" in h.get("name", "")), None) if is_windows else None
+    wasapi_default_out = wasapi_api["default_output_device"] if wasapi_api else -1
+
+    try:
+        default_out_idx = sd.default.device[1]
+    except Exception:
+        default_out_idx = -1
+
+    default_out_name = ""
+    if isinstance(devs, Sequence) and 0 <= default_out_idx < len(devs):
+        dev_info = devs[default_out_idx]
+        if isinstance(dev_info, dict):
+            default_out_name = dev_info.get("name", "")
+
+    primary_pool = []
+    secondary_pool = []
 
     for idx, d in enumerate(devs):
         if not isinstance(d, dict) or d.get("max_output_channels", 0) <= 0:
@@ -41,10 +56,15 @@ def get_windows_output_devices() -> List[Dict[str, Any]]:
         name = d.get("name", "").strip()
 
         # Skip raw mapper or generic driver placeholders
-        if name in ["Microsoft Sound Mapper - Output", "Primary Sound Driver"]:
+        if name in [
+            "Microsoft Sound Mapper - Output",
+            "Primary Sound Driver",
+            "default",
+            "sysdefault",
+        ]:
             continue
 
-        # Clean driver path junk like @System32\drivers\bthhfenum...
+        # Clean Windows driver path junk like @System32\drivers\bthhfenum...
         if "@system32" in name.lower() or "bthhfenum" in name.lower():
             m = re.search(r'\((.*?)\)', name)
             if m:
@@ -71,13 +91,14 @@ def get_windows_output_devices() -> List[Dict[str, Any]]:
             "is_default": is_default
         }
 
-        if "WASAPI" in api:
-            wasapi_devs.append(entry)
+        if is_windows and "WASAPI" in api:
+            primary_pool.append(entry)
+        elif not is_windows and ("Core Audio" in api or "PulseAudio" in api or "ALSA" in api):
+            primary_pool.append(entry)
         else:
-            other_devs.append(entry)
+            secondary_pool.append(entry)
 
-    # Windows native audio endpoints are exposed via WASAPI
-    chosen_pool = wasapi_devs if wasapi_devs else other_devs
+    chosen_pool = primary_pool if primary_pool else secondary_pool
 
     # Deduplicate by friendly name
     seen = set()
@@ -91,3 +112,7 @@ def get_windows_output_devices() -> List[Dict[str, Any]]:
     # Sort so default device appears first
     filtered.sort(key=lambda x: (not x["is_default"], x["name"]))
     return filtered
+
+
+# Backward compatibility alias
+get_windows_output_devices = get_audio_output_devices

@@ -56,6 +56,10 @@ class CussCensorGUI(ctk.CTk):
         self.geometry("1040x760")
         self.minsize(920, 680)
 
+        # Concurrency lock & cancellation controls
+        self._busy = False
+        self._cancel_event = threading.Event()
+
         # Main Tabview (Clean 3-Tab Interface)
         self.tabview = ctk.CTkTabview(self, corner_radius=12)
         self.tabview.pack(fill="both", expand=True, padx=20, pady=12)
@@ -76,6 +80,46 @@ class CussCensorGUI(ctk.CTk):
             ctk.set_appearance_mode("System")
         else:
             ctk.set_appearance_mode("Light")
+
+    def _set_busy(self, busy: bool):
+        """Toggle UI controls during long-running tasks to prevent race conditions."""
+        self._busy = busy
+        state = "disabled" if busy else "normal"
+        cancel_state = "normal" if busy else "disabled"
+        if busy:
+            self._cancel_event.clear()
+
+        for btn in [
+            getattr(self, "single_dl_btn", None),
+            getattr(self, "file_run_btn", None),
+            getattr(self, "file_find_lyrics_btn", None),
+            getattr(self, "pl_download_btn", None),
+            getattr(self, "pl_run_btn", None),
+        ]:
+            if btn:
+                try:
+                    btn.configure(state=state)
+                except Exception:
+                    pass
+
+        for cbtn in [
+            getattr(self, "file_cancel_btn", None),
+            getattr(self, "pl_cancel_btn", None),
+        ]:
+            if cbtn:
+                try:
+                    cbtn.configure(state=cancel_state)
+                except Exception:
+                    pass
+
+    def _cancel_active_task(self):
+        """Signal active background worker to terminate gracefully."""
+        if hasattr(self, "_cancel_event"):
+            self._cancel_event.set()
+            if hasattr(self, "file_log"):
+                self.file_log.insert("end", "\n[Cancellation requested. Aborting in-progress task...]\n")
+            if hasattr(self, "pl_log"):
+                self.pl_log.insert("end", "\n[Cancellation requested. Aborting in-progress task...]\n")
 
     # -------------------------------------------------------------------------
     # TAB 1: Single Song / File (With Direct Downloader)
@@ -256,7 +300,20 @@ class CussCensorGUI(ctk.CTk):
             height=34,
             command=self._start_file_censor
         )
-        self.file_run_btn.pack(side="right")
+        self.file_run_btn.pack(side="right", padx=(8, 0))
+
+        self.file_cancel_btn = ctk.CTkButton(
+            opt_row,
+            text="⏹ Cancel",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="#d6336c",
+            hover_color="#a61e4d",
+            width=80,
+            height=34,
+            command=self._cancel_active_task,
+            state="disabled"
+        )
+        self.file_cancel_btn.pack(side="right")
 
         self.file_progress = ctk.CTkProgressBar(tab)
         self.file_progress.pack(fill="x", padx=15, pady=(4, 6))
@@ -289,52 +346,68 @@ class CussCensorGUI(ctk.CTk):
         quality = self.single_quality_var.get()
         dest_dir = str((root_dir / "downloads").resolve())
 
-        self.single_dl_btn.configure(state="disabled", text="⏳ Downloading...")
+        self._set_busy(True)
+        self.single_dl_btn.configure(text="⏳ Downloading...")
+        self.file_progress.set(0.0)
         self.file_log.delete("1.0", "end")
         self.file_log.insert("end", f"▶ Downloading single song in {quality}...\nURL: {url}\n")
 
+        def progress_cb(pct: float, line_text: str):
+            if pct >= 0:
+                self.after(0, lambda p=pct/100.0: self.file_progress.set(p))
+            if line_text:
+                self.after(0, lambda t=line_text: self.file_log.insert("end", f"  {t}\n"))
+
         def worker():
-            success, target_path, msg = download_song_or_playlist(
-                url, output_dir=dest_dir, quality=quality, is_single=True
-            )
-            if success and target_path:
-                self.after(0, lambda: self.file_in_entry.delete(0, "end"))
-                self.after(0, lambda: self.file_in_entry.insert(0, target_path))
+            try:
+                success, target_path, msg = download_song_or_playlist(
+                    url,
+                    output_dir=dest_dir,
+                    quality=quality,
+                    is_single=True,
+                    progress_callback=progress_cb,
+                    cancel_event=self._cancel_event
+                )
+                if success and target_path:
+                    self.after(0, lambda: self.file_progress.set(1.0))
+                    self.after(0, lambda: self.file_in_entry.delete(0, "end"))
+                    self.after(0, lambda: self.file_in_entry.insert(0, target_path))
 
-                p = Path(target_path)
-                clean_path = str(p.parent / f"{p.stem}_clean{p.suffix}")
-                self.after(0, lambda: self.file_out_entry.delete(0, "end"))
-                self.after(0, lambda: self.file_out_entry.insert(0, clean_path))
+                    p = Path(target_path)
+                    clean_path = str(p.parent / f"{p.stem}_clean{p.suffix}")
+                    self.after(0, lambda: self.file_out_entry.delete(0, "end"))
+                    self.after(0, lambda: self.file_out_entry.insert(0, clean_path))
 
-                # Auto-extract Song Title and Artist Name
-                title, artist = extract_song_and_artist(target_path)
-                self.after(0, lambda t=title, a=artist: (
-                    self.file_song_entry.delete(0, "end"),
-                    self.file_song_entry.insert(0, t),
-                    self.file_artist_entry.delete(0, "end"),
-                    self.file_artist_entry.insert(0, a)
-                ))
-
-                adj_lrc = p.with_suffix(".lrc")
-                adj_desc = p.with_suffix(".description")
-                if adj_lrc.exists():
-                    self.after(0, lambda l=str(adj_lrc): (
-                        self.file_lrc_entry.delete(0, "end"),
-                        self.file_lrc_entry.insert(0, l)
-                    ))
-                elif adj_desc.exists():
-                    self.after(0, lambda d=str(adj_desc): (
-                        self.file_lrc_entry.delete(0, "end"),
-                        self.file_lrc_entry.insert(0, d)
+                    # Auto-extract Song Title and Artist Name
+                    title, artist = extract_song_and_artist(target_path)
+                    self.after(0, lambda t=title, a=artist: (
+                        self.file_song_entry.delete(0, "end"),
+                        self.file_song_entry.insert(0, t),
+                        self.file_artist_entry.delete(0, "end"),
+                        self.file_artist_entry.insert(0, a)
                     ))
 
-                self.after(0, lambda: self.file_log.insert("end", f"\n✔ {msg}\nSaved to: {target_path}\nReady for censoring! Click 'Start Censoring File' below.\n"))
-                self.after(0, lambda: messagebox.showinfo("Downloaded", f"Song downloaded in {quality}!\n\nTarget path and metadata set."))
-            else:
-                self.after(0, lambda: self.file_log.insert("end", f"\n❌ {msg}\n"))
-                self.after(0, lambda: messagebox.showerror("Download Error", msg))
+                    adj_lrc = p.with_suffix(".lrc")
+                    adj_desc = p.with_suffix(".description")
+                    if adj_lrc.exists():
+                        self.after(0, lambda l=str(adj_lrc): (
+                            self.file_lrc_entry.delete(0, "end"),
+                            self.file_lrc_entry.insert(0, l)
+                        ))
+                    elif adj_desc.exists():
+                        self.after(0, lambda d=str(adj_desc): (
+                            self.file_lrc_entry.delete(0, "end"),
+                            self.file_lrc_entry.insert(0, d)
+                        ))
 
-            self.after(0, lambda: self.single_dl_btn.configure(state="normal", text="📥 Download Song"))
+                    self.after(0, lambda: self.file_log.insert("end", f"\n✔ {msg}\nSaved to: {target_path}\nReady for censoring! Click 'Start Censoring File' below.\n"))
+                    self.after(0, lambda: messagebox.showinfo("Downloaded", f"Song downloaded in {quality}!\n\nTarget path and metadata set."))
+                else:
+                    self.after(0, lambda: self.file_log.insert("end", f"\n❌ {msg}\n"))
+                    self.after(0, lambda: messagebox.showerror("Download Error", msg))
+            finally:
+                self.after(0, lambda: self.single_dl_btn.configure(text="📥 Download Song"))
+                self.after(0, lambda: self._set_busy(False))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -599,7 +672,8 @@ class CussCensorGUI(ctk.CTk):
         elif getattr(self, "_pasted_lyrics_text", None):
             custom_lrc_text = self._pasted_lyrics_text
 
-        self.file_run_btn.configure(state="disabled", text="⏳ Processing...")
+        self._set_busy(True)
+        self.file_run_btn.configure(text="⏳ Processing...")
         self.file_progress.set(0.10)
         self.file_log.delete("1.0", "end")
 
@@ -759,7 +833,8 @@ class CussCensorGUI(ctk.CTk):
                 self.after(0, lambda err=str(e): self.file_log.insert("end", f"\n❌ Error: {err}\n"))
                 self.after(0, lambda err=str(e): messagebox.showerror("Processing Error", err))
             finally:
-                self.after(0, lambda: self.file_run_btn.configure(state="normal", text="▶ Start Censoring File"))
+                self.after(0, lambda: self.file_run_btn.configure(text="▶ Start Censoring File"))
+                self.after(0, lambda: self._set_busy(False))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -883,6 +958,18 @@ class CussCensorGUI(ctk.CTk):
         )
         self.pl_run_btn.pack(side="left", padx=(0, 8))
 
+        self.pl_cancel_btn = ctk.CTkButton(
+            act_row,
+            text="⏹ Cancel",
+            font=ctk.CTkFont(weight="bold"),
+            width=80,
+            fg_color="#d6336c",
+            hover_color="#a61e4d",
+            command=self._cancel_active_task,
+            state="disabled"
+        )
+        self.pl_cancel_btn.pack(side="left", padx=(0, 8))
+
         self.pl_open_btn = ctk.CTkButton(
             act_row,
             text="📂 Open Folder",
@@ -953,16 +1040,30 @@ class CussCensorGUI(ctk.CTk):
             return
 
         quality = self.pl_quality_var.get()
-        self.pl_download_btn.configure(state="disabled", text="⏳ Downloading...")
+        self._set_busy(True)
+        self.pl_download_btn.configure(text="⏳ Downloading...")
+        self.pl_progress.set(0.0)
         self.pl_log.delete("1.0", "end")
         self.pl_log.insert("end", f"▶ Starting Playlist Download in {quality}...\nURL: {url}\n\n")
+
+        def progress_cb(pct: float, line_text: str):
+            if pct >= 0:
+                self.after(0, lambda p=pct/100.0: self.pl_progress.set(p))
+            if line_text:
+                self.after(0, lambda t=line_text: self.pl_log.insert("end", f"  {t}\n"))
 
         def worker():
             try:
                 success, target_path, msg = download_song_or_playlist(
-                    url, output_dir=outp, quality=quality, is_single=False
+                    url,
+                    output_dir=outp,
+                    quality=quality,
+                    is_single=False,
+                    progress_callback=progress_cb,
+                    cancel_event=self._cancel_event
                 )
                 if success:
+                    self.after(0, lambda: self.pl_progress.set(1.0))
                     self.after(0, lambda: self.pl_log.insert("end", f"\n✔ {msg}\nSaved to: {outp}\nReady to censor! Click 'Batch Censor' to clean profanities.\n"))
                     self.after(0, lambda: messagebox.showinfo("Download Complete", f"Playlist downloaded in {quality}!\nSaved to: {outp}\n\nYou can now click 'Batch Censor'."))
                 else:
@@ -971,7 +1072,8 @@ class CussCensorGUI(ctk.CTk):
             except Exception as e:
                 self.after(0, lambda err=str(e): self.pl_log.insert("end", f"\n❌ Download error: {err}\n"))
             finally:
-                self.after(0, lambda: self.pl_download_btn.configure(state="normal", text="📥 Download Playlist"))
+                self.after(0, lambda: self.pl_download_btn.configure(text="📥 Download Playlist"))
+                self.after(0, lambda: self._set_busy(False))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -986,7 +1088,8 @@ class CussCensorGUI(ctk.CTk):
         lang = self.pl_lang_var.get()
         model_name = self.pl_model_var.get().split()[0].lower()
 
-        self.pl_run_btn.configure(state="disabled", text="⏳ Processing...")
+        self._set_busy(True)
+        self.pl_run_btn.configure(text="⏳ Processing...")
         self.pl_progress.set(0.1)
         self.pl_log.delete("1.0", "end")
         self.pl_log.insert("end", f"▶ Initializing hybrid matcher (online synced lyrics first -> Whisper '{model_name}' fallback)...\n")
@@ -1001,7 +1104,8 @@ class CussCensorGUI(ctk.CTk):
                     output_dir=outp,
                     time_offset=shift_val,
                     pre_padding=0.25,
-                    post_padding=0.18
+                    post_padding=0.18,
+                    cancel_event=self._cancel_event
                 )
                 manifest = runner.inspector.inspect_target(inp)
                 total_tracks = len(manifest.tracks)
@@ -1015,6 +1119,10 @@ class CussCensorGUI(ctk.CTk):
                 total_words = 0
 
                 for idx, track in enumerate(manifest.tracks):
+                    if self._cancel_event.is_set():
+                        self.after(0, lambda: self.pl_log.insert("end", "\n[Batch processing cancelled by user.]\n"))
+                        break
+
                     t_msg = f"[{idx+1}/{total_tracks}] Processing: {track.title}...\n"
                     self.after(0, lambda m=t_msg: self.pl_log.insert("end", m))
 
@@ -1047,7 +1155,10 @@ class CussCensorGUI(ctk.CTk):
                 self.after(0, lambda err=str(e): self.pl_log.insert("end", f"\n❌ Error: {err}\n"))
                 self.after(0, lambda err=str(e): messagebox.showerror("Batch Error", err))
             finally:
-                self.after(0, lambda: self.pl_run_btn.configure(state="normal", text="▶ Batch Censor"))
+                self.after(0, lambda: self.pl_run_btn.configure(text="▶ Batch Censor"))
+                self.after(0, lambda: self._set_busy(False))
+
+        threading.Thread(target=worker, daemon=True).start()
 
         threading.Thread(target=worker, daemon=True).start()
 

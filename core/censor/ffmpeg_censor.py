@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import List
 from core.filter.detector import CensorInterval
 from core.censor.beep import AudioCensor
+from core.system_checks import check_binary
+from core.logger import get_logger
+
+logger = get_logger("censor.ffmpeg")
 
 
 class FFmpegCensor:
@@ -40,13 +44,22 @@ class FFmpegCensor:
                 input_path, output_path, intervals, mode=mode
             )
 
+        if not check_binary("ffmpeg"):
+            raise RuntimeError(
+                "FFmpeg executable not found in system PATH. "
+                "Please install FFmpeg to process and remux video files."
+            )
+
         if not intervals:
             # No censorship needed; copy streams
             cmd = [
                 "ffmpeg", "-y", "-i", input_path,
                 "-c", "copy", output_path
             ]
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode != 0:
+                logger.error("FFmpeg stream copy failed: %s", res.stderr)
+                raise RuntimeError(f"FFmpeg stream copy failed: {res.stderr[:200]}")
             return output_path
 
         # For video: extract audio track to temporary WAV, censor it with AudioCensor, then remux
@@ -59,7 +72,10 @@ class FFmpegCensor:
                 "ffmpeg", "-y", "-i", input_path,
                 "-vn", "-acodec", "pcm_s16le", temp_audio_in
             ]
-            subprocess.run(cmd_extract, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            res_ext = subprocess.run(cmd_extract, capture_output=True, text=True)
+            if res_ext.returncode != 0:
+                logger.error("FFmpeg audio extraction failed: %s", res_ext.stderr)
+                raise RuntimeError(f"FFmpeg audio extraction failed: {res_ext.stderr[:200]}")
 
             # 2. Censor audio track
             self.beep_censor.censor_audio_file(
@@ -80,6 +96,10 @@ class FFmpegCensor:
                 "-shortest",
                 output_path
             ]
-            subprocess.run(cmd_remux, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            res_mux = subprocess.run(cmd_remux, capture_output=True, text=True)
+            if res_mux.returncode != 0:
+                logger.error("FFmpeg remuxing failed: %s", res_mux.stderr)
+                raise RuntimeError(f"FFmpeg remuxing failed: {res_mux.stderr[:200]}")
 
+        logger.info("Successfully censored video: %s -> %s", input_path, output_path)
         return output_path
