@@ -14,7 +14,6 @@ from core.asr.whisper_engine import WhisperEngine
 from core.filter.detector import ProfanityDetector
 from core.rea.protocol_probe import REAProtocolProbe
 from core.devices import get_windows_output_devices
-from ui.gui import launch_gui
 from downloader import QUALITY_PROFILES, download_song_or_playlist, download_high_quality
 
 console = Console(legacy_windows=False)
@@ -29,6 +28,7 @@ def cli():
 @cli.command(name="gui")
 def run_gui():
     """Launch the modern desktop GUI (Lite Mode) with all features."""
+    from ui.gui import launch_gui
     launch_gui()
 
 

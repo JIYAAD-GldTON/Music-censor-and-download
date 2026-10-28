@@ -24,7 +24,6 @@ root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-import sounddevice as sd
 from core.filter.detector import ProfanityDetector
 from core.asr.whisper_engine import WhisperEngine
 from core.censor.ffmpeg_censor import FFmpegCensor
