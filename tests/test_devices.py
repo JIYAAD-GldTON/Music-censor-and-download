@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from core.devices import get_windows_output_devices
 
 
@@ -20,15 +20,14 @@ class TestDevices(unittest.TestCase):
             self.assertNotIn("bthhfenum", d["name"].lower())
             self.assertNotIn("microsoft sound mapper", d["name"].lower())
 
-    @patch("sounddevice.query_devices")
-    @patch("sounddevice.query_hostapis")
-    def test_device_filtering_and_default_sorting(self, mock_apis, mock_devs):
-        mock_apis.return_value = [
+    @patch("core.devices.sd")
+    def test_device_filtering_and_default_sorting(self, mock_sd):
+        mock_sd.query_hostapis.return_value = [
             {"name": "MME", "default_output_device": 0},
             {"name": "Windows DirectSound", "default_output_device": 1},
             {"name": "Windows WASAPI", "default_output_device": 3},
         ]
-        mock_devs.return_value = [
+        mock_sd.query_devices.return_value = [
             {"name": "Microsoft Sound Mapper - Output", "max_output_channels": 2, "hostapi": 0, "default_samplerate": 44100},
             {"name": "Primary Sound Driver", "max_output_channels": 2, "hostapi": 1, "default_samplerate": 44100},
             {"name": "Speakers (Realtek(R) Audio)", "max_output_channels": 2, "hostapi": 2, "default_samplerate": 48000},
@@ -37,10 +36,8 @@ class TestDevices(unittest.TestCase):
             {"name": r"@System32\drivers\bthhfenum.sys,#2;Bluetooth Hands-Free (JBL)", "max_output_channels": 1, "hostapi": 2, "default_samplerate": 16000},
             {"name": "Microphone (Realtek)", "max_output_channels": 0, "hostapi": 2, "default_samplerate": 48000},  # input only
         ]
-
-        with patch("sounddevice.default") as mock_default:
-            mock_default.device = [0, 0]
-            devs = get_windows_output_devices()
+        mock_sd.default.device = [0, 0]
+        devs = get_windows_output_devices()
 
         names = [d["name"] for d in devs]
         # Mapper and input-only should be filtered
