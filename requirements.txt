@@ -1,4 +1,4 @@
-openai-whisper>=20231117,<20250000
+openai-whisper>=20231117
 customtkinter>=5.2.0,<6.0.0
 syncedlyrics>=1.0.0,<2.0.0
 sounddevice>=0.4.6,<1.0.0
@@ -11,4 +11,4 @@ scipy>=1.11.0,<2.0.0
 torch>=2.0.0,<3.0.0
 tqdm>=4.66.0,<5.0.0
 spotdl>=4.2.0,<5.0.0
-mutagen>=0.47.0,<1.0.0
+mutagen>=1.47.0,<2.0.0

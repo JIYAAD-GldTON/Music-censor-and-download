@@ -8,7 +8,12 @@ import sys
 import re
 from typing import List, Dict, Any
 from collections.abc import Sequence
-import sounddevice as sd
+
+try:
+    import sounddevice as sd
+except Exception:
+    sd = None
+
 from core.logger import get_logger
 
 logger = get_logger("devices")
@@ -22,6 +27,10 @@ def get_audio_output_devices() -> List[Dict[str, Any]]:
       - macOS: Resolves CoreAudio playback endpoints.
       - Linux: Resolves PulseAudio / ALSA playback endpoints.
     """
+    if sd is None:
+        logger.debug("sounddevice library is not available or audio host is unreachable.")
+        return []
+
     try:
         devs = sd.query_devices()
         apis = sd.query_hostapis()
