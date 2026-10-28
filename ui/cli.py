@@ -4,7 +4,6 @@ Provides subcommands: gui, file, playlist, download, rea-probe, and devices.
 """
 
 import click
-import sounddevice as sd
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel

@@ -38,8 +38,7 @@ def get_audio_output_devices() -> List[Dict[str, Any]]:
         logger.debug("Failed querying audio devices: %s", e)
         return []
 
-    is_windows = sys.platform == "win32"
-    wasapi_api = next((h for h in apis if "WASAPI" in h.get("name", "")), None) if is_windows else None
+    wasapi_api = next((h for h in apis if "WASAPI" in h.get("name", "")), None)
     wasapi_default_out = wasapi_api["default_output_device"] if wasapi_api else -1
 
     try:
@@ -100,9 +99,7 @@ def get_audio_output_devices() -> List[Dict[str, Any]]:
             "is_default": is_default
         }
 
-        if is_windows and "WASAPI" in api:
-            primary_pool.append(entry)
-        elif not is_windows and ("Core Audio" in api or "PulseAudio" in api or "ALSA" in api):
+        if "WASAPI" in api or "Core Audio" in api or "PulseAudio" in api or "ALSA" in api:
             primary_pool.append(entry)
         else:
             secondary_pool.append(entry)
