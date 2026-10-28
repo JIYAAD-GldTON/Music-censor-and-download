@@ -752,6 +752,162 @@ class OnlineLyricsProvider:
             return f"{title} {artist}"
         return title or Path(media_path).stem
 
+    @staticmethod
+    def _clean_primary_artist(artist_str: str) -> str:
+        """Extract primary artist from comma, slash, or ft. separated list."""
+        if not artist_str:
+            return ""
+        # Split on comma, slash, semicolon, feat, ft, &, x
+        parts = re.split(r'[,/;|&]|(?:(?:feat\.?|ft\.?|featuring|prod\.?|x))', artist_str, flags=re.I)
+        cleaned = parts[0].strip() if parts else artist_str.strip()
+        cleaned = re.sub(r'["\']', '', cleaned).strip()
+        return cleaned
+
+    @staticmethod
+    def _get_spelling_variants(query: str) -> List[str]:
+        """Generate phonetic/spelling variants for common Hinglish/Hindi lyric queries."""
+        variants = [query]
+        q_lower = query.lower()
+
+        # Ashiq <-> Aashiq
+        if 'ashiq' in q_lower and 'aashiq' not in q_lower:
+            variants.append(re.sub(r'\bashiq\b', 'Aashiq', query, flags=re.I))
+        elif 'aashiq' in q_lower:
+            variants.append(re.sub(r'\baashiq\b', 'Ashiq', query, flags=re.I))
+
+        # Bhai <-> Bhayi
+        if 'bhai' in q_lower:
+            variants.append(re.sub(r'\bbhai\b', 'Bhayi', query, flags=re.I))
+
+        # Pio <-> Piyo
+        if 'pio' in q_lower:
+            variants.append(re.sub(r'\bpio\b', 'Piyo', query, flags=re.I))
+
+        # Chutiye <-> Chutiya
+        if 'chutiye' in q_lower:
+            variants.append(re.sub(r'\bchutiye\b', 'Chutiya', query, flags=re.I))
+
+        # Benchod / Bhenchod variants
+        if 'benchod' in q_lower or 'bhenchod' in q_lower:
+            variants.append(re.sub(r'\b(benchod|bhenchod)\b', 'Bhenchod', query, flags=re.I))
+            variants.append(re.sub(r'\b(benchod|bhenchod)\b', 'BC', query, flags=re.I))
+
+        return list(dict.fromkeys(variants))
+
+    def _fetch_lrclib_direct(
+        self,
+        track_name: Optional[str] = None,
+        artist_name: Optional[str] = None,
+        query: Optional[str] = None
+    ) -> Tuple[Optional[str], bool]:
+        """
+        Direct LRCLIB API client with identifiable User-Agent to bypass Cloudflare 503 blocks.
+        Tries exact /api/get first, then /api/search with retry backoff.
+        Returns: (lyrics_text, is_synced)
+        """
+        import requests
+        headers = {'User-Agent': 'CussCensor/2.0 (https://github.com/JIYAAD-GldTON/Music-censor-and-download)'}
+
+        # 1. Exact track + artist lookup via /api/get (fastest, rarely overloaded)
+        if track_name:
+            clean_track = re.sub(r'\(.*?\)|\[.*?\]|[:：|｜\-–—].*', '', track_name).strip() or track_name.strip()
+            params = {'track_name': clean_track}
+            if artist_name:
+                params['artist_name'] = self._clean_primary_artist(artist_name)
+            for _ in range(2):
+                try:
+                    r = requests.get('https://lrclib.net/api/get', params=params, headers=headers, timeout=5)
+                    if r.status_code == 200:
+                        d = r.json()
+                        if d.get('syncedLyrics'):
+                            return d.get('syncedLyrics'), True
+                        elif d.get('plainLyrics'):
+                            return d.get('plainLyrics'), False
+                    elif r.status_code == 503:
+                        import time; time.sleep(0.5)
+                        continue
+                    break
+                except Exception:
+                    pass
+
+        # 2. Search queries via /api/search
+        search_terms = []
+        if query:
+            search_terms.append(query)
+        if track_name and artist_name:
+            primary = self._clean_primary_artist(artist_name)
+            search_terms.append(f"{track_name} {primary}")
+            if primary != artist_name:
+                search_terms.append(f"{track_name} {artist_name}")
+        if track_name:
+            search_terms.append(track_name)
+
+        for q in search_terms:
+            for attempt in range(2):
+                try:
+                    r = requests.get('https://lrclib.net/api/search', params={'q': q}, headers=headers, timeout=5)
+                    if r.status_code == 200:
+                        results = r.json()
+                        if isinstance(results, list):
+                            # First pass: find any result with synced lyrics
+                            for item in results:
+                                if item.get('syncedLyrics'):
+                                    return item.get('syncedLyrics'), True
+                            # Second pass: find result with plain lyrics
+                            for item in results:
+                                if item.get('plainLyrics'):
+                                    return item.get('plainLyrics'), False
+                    elif r.status_code == 503:
+                        import time; time.sleep(0.6)
+                        continue
+                    break
+                except Exception:
+                    pass
+
+        return None, False
+
+    def _fetch_netease_direct(self, query: str) -> Optional[str]:
+        """Direct NetEase Cloud Music search for Asian / Indian synced lyrics."""
+        import requests
+        try:
+            search_url = "https://music.163.com/api/search/pc"
+            r = requests.get(search_url, params={"s": query, "type": 1, "limit": 5, "offset": 0}, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                songs = data.get("result", {}).get("songs", [])
+                if songs:
+                    song_id = songs[0].get("id")
+                    if song_id:
+                        lrc_url = f"https://music.163.com/api/song/lyric?id={song_id}&lv=1&kv=1&tv=-1"
+                        lr = requests.get(lrc_url, timeout=5)
+                        if lr.status_code == 200:
+                            lrc_content = lr.json().get("lrc", {}).get("lyric", "")
+                            if lrc_content and "[" in lrc_content and ":" in lrc_content:
+                                return lrc_content
+        except Exception:
+            pass
+        return None
+
+    def _fetch_youtube_captions(self, media_path: str, yt_desc_text: Optional[str]) -> Optional[List[WordTimestamp]]:
+        """Fetch YouTube captions/subtitles via YouTube Transcript API if URL is known."""
+        from core.asr.subtitle_parser import extract_video_id, fetch_youtube_transcript_api
+        vid = None
+        if is_youtube_url(media_path):
+            vid = extract_video_id(media_path)
+        elif yt_desc_text:
+            m = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/)([0-9A-Za-z_-]{11})', yt_desc_text)
+            if m:
+                vid = m.group(1)
+
+        if vid:
+            try:
+                words = fetch_youtube_transcript_api(vid)
+                if words and len(words) >= 5:
+                    return words
+            except Exception:
+                pass
+        return None
+
     def get_candidate_queries(
         self,
         media_path: str,
@@ -760,8 +916,8 @@ class OnlineLyricsProvider:
         artist_name: Optional[str] = None
     ) -> List[str]:
         """
-        Derive prioritized search candidates:
-        Prioritizes: Song Name with Artist (Highest hit-rate on LRCLIB / Musixmatch / NetEase).
+        Derive exhaustive, prioritized search candidates:
+        Handles single-word titles, primary vs credited artists, and transliteration variants.
         """
         candidates: List[str] = []
 
@@ -772,19 +928,26 @@ class OnlineLyricsProvider:
         # 2. User-provided explicit song_title and/or artist_name
         s_title = (song_title or "").strip()
         a_name = (artist_name or "").strip()
+        if a_name.lower() == "none":
+            a_name = ""
+        if s_title.lower() == "none":
+            s_title = ""
+
         if s_title and a_name:
-            candidates.append(f"{s_title} {a_name}")
-            candidates.append(f"{a_name} {s_title}")
+            primary = self._clean_primary_artist(a_name)
+            candidates.append(f"{s_title} {primary}")
+            if primary != a_name:
+                candidates.append(f"{s_title} {a_name}")
+            candidates.append(f"{primary} {s_title}")
             candidates.append(s_title)
-            # Add cleaned short title variants (strip YouTube noise like : | Viral Song)
             clean_short = re.sub(r'\(.*?\)|\[.*?\]|[:：|｜\-–—].*', '', s_title).strip()
-            if clean_short and len(clean_short) >= 3 and clean_short != s_title:
-                candidates.append(f"{clean_short} {a_name}")
+            if clean_short and len(clean_short) >= 2 and clean_short != s_title:
+                candidates.append(f"{clean_short} {primary}")
                 candidates.append(clean_short)
         elif s_title:
             candidates.append(s_title)
             clean_short = re.sub(r'\(.*?\)|\[.*?\]|[:：|｜\-–—].*', '', s_title).strip()
-            if clean_short and len(clean_short) >= 3 and clean_short != s_title:
+            if clean_short and len(clean_short) >= 2 and clean_short != s_title:
                 candidates.append(clean_short)
         elif a_name:
             candidates.append(a_name)
@@ -792,40 +955,46 @@ class OnlineLyricsProvider:
         # 3. Metadata tags (mutagen)
         meta_title, meta_artist = extract_song_and_artist(media_path)
         clean_title = re.sub(r'\(.*?\)|\[.*?\]', '', meta_title).strip()
+        clean_title = re.sub(r'^\d{1,3}[.\-_\s]+', '', clean_title).strip()  # strip leading track number
         if clean_title and meta_artist:
-            cand_song_art = f"{clean_title} {meta_artist}".strip()
-            if cand_song_art not in candidates:
-                candidates.append(cand_song_art)  # Song Name with Artist
-            cand_art_song = f"{meta_artist} {clean_title}".strip()
-            if cand_art_song not in candidates:
-                candidates.append(cand_art_song)  # Artist with Song Name
-            if clean_title not in candidates:
-                candidates.append(clean_title)     # Song Name alone
-        elif clean_title and clean_title not in candidates:
+            primary_meta = self._clean_primary_artist(meta_artist)
+            candidates.append(f"{clean_title} {primary_meta}")
+            if primary_meta != meta_artist:
+                candidates.append(f"{clean_title} {meta_artist}")
+            candidates.append(f"{primary_meta} {clean_title}")
+            candidates.append(clean_title)
+        elif clean_title:
             candidates.append(clean_title)
 
         # 4. Filename stem fallback
         stem = Path(media_path).stem
         cleaned = re.sub(r'(_clean|_censored)+$', '', stem, flags=re.I)
-        cleaned = re.sub(r'\(.*?\)|\[.*?\]|official audio|lyrics|official video', '', cleaned, flags=re.I)
-        cleaned = re.sub(r'[:：|｜_\-–—]+', ' ', cleaned).strip()
-        if cleaned and cleaned not in candidates:
+        cleaned = re.sub(r'\(.*?\)|\[.*?\]|official audio|lyrics|official video|video song', '', cleaned, flags=re.I)
+        cleaned = re.sub(r'^\d{1,3}[.\-_\s]+', '', cleaned).strip()
+        cleaned_spaces = re.sub(r'[:：|｜_\-–—]+', ' ', cleaned).strip()
+        if cleaned_spaces:
             if " - " in cleaned:
                 parts = cleaned.split(" - ", 1)
                 part_art, part_tit = parts[0].strip(), parts[1].strip()
-                if f"{part_tit} {part_art}" not in candidates:
-                    candidates.append(f"{part_tit} {part_art}")  # Song Name with Artist
-                if f"{part_art} {part_tit}" not in candidates:
-                    candidates.append(f"{part_art} {part_tit}")  # Artist with Song Name
-                if part_tit and part_tit not in candidates:
+                primary_p_art = self._clean_primary_artist(part_art)
+                candidates.append(f"{part_tit} {primary_p_art}")
+                candidates.append(f"{primary_p_art} {part_tit}")
+                if part_tit:
                     candidates.append(part_tit)
-            candidates.append(cleaned)
+            candidates.append(cleaned_spaces)
 
-        # Filter out empty or extremely short candidates (< 3 chars)
+        # 5. Expand spelling variants (e.g. Ashiq -> Aashiq)
+        expanded: List[str] = []
+        for cand in candidates:
+            for variant in self._get_spelling_variants(cand):
+                if variant not in expanded:
+                    expanded.append(variant)
+
+        # Filter out empty or 1-character candidates (allow 2-character titles like "TT", "11K", "101")
         final_candidates: List[str] = []
-        for c in candidates:
+        for c in expanded:
             c = c.strip()
-            if len(c) >= 3 and c not in final_candidates:
+            if len(c) >= 2 and c not in final_candidates:
                 final_candidates.append(c)
 
         return final_candidates
@@ -840,15 +1009,20 @@ class OnlineLyricsProvider:
         youtube_desc: Optional[str] = None
     ) -> Optional[List[WordTimestamp]]:
         """
-        Fetch synchronized lyrics in strict 3-Phase Priority:
+        Fetch synchronized lyrics with 100% Exhaustive Multi-Tier Search:
         PHASE 1 (100% Pre-Timed):
           1A. Custom pasted [mm:ss] lyrics
           1B. Local .lrc file
           1C. YouTube Description with explicit timestamps (0:15 ..., chapters)
-          1D. Online Synced Databases (LRCLIB, Musixmatch, NetEase)
-        PHASE 2 (Untimed Ground-Truth Lyrics -> AI Audio Alignment):
-          2A. Untimed lyrics block from YouTube description
-          2B. Custom pasted untimed lyrics
+          1D. YouTube CC / Subtitle Transcript (YouTube Transcript API)
+          1E. Direct LRCLIB Engine (Exact /api/get + /api/search with retry)
+          1F. Direct NetEase Cloud Music Engine
+          1G. SyncedLyrics Multi-Provider Fallback
+        PHASE 2 (Ground-Truth Untimed Lyrics -> AI Audio Alignment):
+          2A. Untimed lyrics from LRCLIB / NetEase plain text
+          2B. Untimed lyrics block from YouTube description
+          2C. On-the-fly YouTube description search
+          2D. Custom pasted untimed lyrics
         PHASE 3:
           Return None -> Fallback to pure OpenAI Whisper AI speech recognition
         """
@@ -860,6 +1034,7 @@ class OnlineLyricsProvider:
 
         p = Path(media_path)
         local_lrc = p.with_suffix(".lrc")
+        plain_lyrics_candidates: List[Tuple[str, str]] = []  # (source, text)
 
         # =====================================================================
         # PHASE 1: Exhaust 100% Pre-Timed Lyrics Sources First
@@ -893,6 +1068,25 @@ class OnlineLyricsProvider:
             except Exception:
                 pass
 
+        # Also check base stem .lrc if file has _clean / _censored suffix
+        base_stem = re.sub(r'(_clean|_censored)+$', '', p.stem, flags=re.I)
+        if base_stem != p.stem:
+            base_lrc = p.parent / f"{base_stem}.lrc"
+            if base_lrc.exists():
+                try:
+                    with open(base_lrc, "r", encoding="utf-8", errors="ignore") as f:
+                        content_lrc = f.read()
+                    words = parse_lrc_content(content_lrc)
+                    if words:
+                        self.last_source = "local (base file)"
+                        self.is_untimed = False
+                        self.last_matched_query = base_lrc.name
+                        self.last_raw_lyrics = content_lrc
+                        self.last_timed_lines = parse_lrc_lines(content_lrc)
+                        return words
+                except Exception:
+                    pass
+
         # 1C. YouTube description with EXPLICIT timestamps
         yt_desc_text = self._get_youtube_description_text(media_path, youtube_desc)
         yt_untimed_result = None
@@ -915,34 +1109,89 @@ class OnlineLyricsProvider:
                 else:
                     yt_untimed_result = yt_res
 
-        # 1D. Online Synced Databases (LRCLIB, Musixmatch, NetEase)
+        # 1D. YouTube Subtitles / CC via Transcript API
+        yt_captions_words = self._fetch_youtube_captions(media_path, yt_desc_text)
+        if yt_captions_words and len(yt_captions_words) >= 5:
+            self.last_source = "youtube_subtitles (auto/manual CC)"
+            self.is_untimed = False
+            self.last_matched_query = "YouTube Captions"
+            return yt_captions_words
+
+        # Get candidate queries
+        meta_title, meta_artist = extract_song_and_artist(media_path)
+        eff_title = song_title or meta_title
+        eff_artist = artist_name or meta_artist
+        candidates = self.get_candidate_queries(
+            media_path,
+            custom_query=custom_query,
+            song_title=song_title,
+            artist_name=artist_name
+        )
+
+        # 1E. Direct LRCLIB Engine (Exact match + fuzzy search with retry & User-Agent)
+        logger.info("Executing Direct LRCLIB search with %d candidate queries...", len(candidates))
+        # First try exact get
+        if eff_title:
+            lrc_direct, is_synced = self._fetch_lrclib_direct(eff_title, eff_artist)
+            if lrc_direct:
+                if is_synced:
+                    words = parse_lrc_content(lrc_direct)
+                    if words and len(words) >= 4:
+                        self.last_source = "LRCLIB (Direct Synced)"
+                        self.is_untimed = False
+                        self.last_matched_query = f"{eff_title} - {eff_artist or ''}".strip()
+                        self.last_raw_lyrics = lrc_direct
+                        self.last_timed_lines = parse_lrc_lines(lrc_direct)
+                        self._save_lrc_cache(local_lrc, lrc_direct)
+                        return words
+                else:
+                    plain_lyrics_candidates.append(("LRCLIB", lrc_direct))
+
+        # Next try candidate queries on LRCLIB
+        for query in candidates:
+            lrc_direct, is_synced = self._fetch_lrclib_direct(query=query)
+            if lrc_direct:
+                if is_synced:
+                    words = parse_lrc_content(lrc_direct)
+                    if words and len(words) >= 4:
+                        self.last_source = "LRCLIB (Direct Synced)"
+                        self.is_untimed = False
+                        self.last_matched_query = query
+                        self.last_raw_lyrics = lrc_direct
+                        self.last_timed_lines = parse_lrc_lines(lrc_direct)
+                        self._save_lrc_cache(local_lrc, lrc_direct)
+                        return words
+                else:
+                    plain_lyrics_candidates.append(("LRCLIB", lrc_direct))
+
+        # 1F. Direct NetEase Cloud Music API
+        for query in candidates[:4]:
+            netease_lrc = self._fetch_netease_direct(query)
+            if netease_lrc:
+                words = parse_lrc_content(netease_lrc)
+                if words and len(words) >= 4:
+                    self.last_source = "NetEase (Direct Synced)"
+                    self.is_untimed = False
+                    self.last_matched_query = query
+                    self.last_raw_lyrics = netease_lrc
+                    self.last_timed_lines = parse_lrc_lines(netease_lrc)
+                    self._save_lrc_cache(local_lrc, netease_lrc)
+                    return words
+
+        # 1G. SyncedLyrics Multi-Provider Fallback (Musixmatch, Deezer, etc.)
         if self.available:
-            candidates = self.get_candidate_queries(
-                media_path,
-                custom_query=custom_query,
-                song_title=song_title,
-                artist_name=artist_name
-            )
             for query in candidates:
-                tokens = query.strip().split()
-                if len(tokens) < 2 and not custom_query and not song_title:
-                    continue
                 try:
-                    lrc = syncedlyrics.search(query)
+                    lrc = syncedlyrics.search(query, synced_only=True)
                     if lrc:
                         words = parse_lrc_content(lrc)
-                        if words and len(words) >= 5:
-                            self.last_source = "online"
+                        if words and len(words) >= 4:
+                            self.last_source = "syncedlyrics (online)"
                             self.is_untimed = False
                             self.last_matched_query = query
                             self.last_raw_lyrics = lrc
                             self.last_timed_lines = parse_lrc_lines(lrc)
-                            if not local_lrc.exists():
-                                try:
-                                    with open(local_lrc, "w", encoding="utf-8") as lf:
-                                        lf.write(lrc)
-                                except Exception:
-                                    pass
+                            self._save_lrc_cache(local_lrc, lrc)
                             return words
                 except Exception:
                     continue
@@ -951,7 +1200,27 @@ class OnlineLyricsProvider:
         # PHASE 2: No Pre-Timed Lyrics Found! Check for Ground-Truth UNTIMED Lyrics
         # =====================================================================
 
-        # 2A. Untimed lyrics from YouTube description (local file or embedded tags)
+        # 2A. Untimed plain lyrics from LRCLIB or NetEase
+        if plain_lyrics_candidates:
+            src_name, plain_text = plain_lyrics_candidates[0]
+            raw_lines = [l.strip() for l in plain_text.splitlines() if l.strip() and not l.startswith(('[', 'http', '#'))]
+            if len(raw_lines) >= 3:
+                duration = get_audio_duration(media_path)
+                dur = duration or (len(raw_lines) * 3.5 + 20.0)
+                start_off = min(12.0, dur * 0.08)
+                end_off = max(start_off + 10.0, dur - min(10.0, dur * 0.06))
+                step = (end_off - start_off) / len(raw_lines)
+                timed_lines = [(start_off + i * step, l) for i, l in enumerate(raw_lines)]
+                lrc_lines = [f"[{int(ts // 60):02d}:{ts % 60:05.2f}] {text}" for ts, text in timed_lines]
+                formatted_lrc = "\n".join(lrc_lines)
+                self.last_source = f"{src_name} (untimed plain lyrics)"
+                self.is_untimed = True
+                self.last_matched_query = "Ground-Truth Plain Lyrics"
+                self.last_raw_lyrics = formatted_lrc
+                self.last_timed_lines = timed_lines
+                return parse_lrc_content(formatted_lrc)
+
+        # 2B. Untimed lyrics from YouTube description (local file or embedded tags)
         if yt_untimed_result and len(yt_untimed_result) >= 2:
             lrc_lines = [f"[{int(ts // 60):02d}:{ts % 60:05.2f}] {text}" for ts, text in yt_untimed_result]
             formatted_lrc = "\n".join(lrc_lines)
@@ -964,7 +1233,7 @@ class OnlineLyricsProvider:
                 self.last_timed_lines = yt_untimed_result
                 return words
 
-        # 2B. On-the-fly YouTube Description Search (fallback when local description is absent)
+        # 2C. On-the-fly YouTube Description Search (fallback when local description is absent)
         search_desc_text = self._search_youtube_for_description(
             media_path,
             song_title=song_title,
@@ -985,7 +1254,7 @@ class OnlineLyricsProvider:
                     self.last_timed_lines = yt_res
                     return words
 
-        # 2C. Custom pasted untimed lyrics
+        # 2D. Custom pasted untimed lyrics
         if custom_lrc_text and custom_lrc_text.strip():
             raw_lines = [l.strip() for l in custom_lrc_text.splitlines() if l.strip()]
             if raw_lines:
@@ -1007,6 +1276,16 @@ class OnlineLyricsProvider:
         # PHASE 3: No lyrics anywhere -> Returns None (Triggers Whisper AI Fallback)
         # =====================================================================
         return None
+
+    @staticmethod
+    def _save_lrc_cache(target_path: Path, lrc_content: str):
+        """Helper to cache downloaded LRC file alongside media."""
+        try:
+            if not target_path.exists():
+                with open(target_path, "w", encoding="utf-8") as lf:
+                    lf.write(lrc_content)
+        except Exception:
+            pass
 
     def get_annotated_lyrics_lines(self, profanity_detector=None) -> List[Tuple[float, str, bool]]:
         """
